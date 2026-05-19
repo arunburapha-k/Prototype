@@ -1,5 +1,5 @@
 import React from 'react';
-import { Filter, ChevronDown, Activity, Edit2, Check, Loader2 } from 'lucide-react';
+import { Filter, ChevronDown, Activity, Edit2, Check, Loader2, Search } from 'lucide-react';
 import type { SensorConfig } from '../../types/index';
 
 interface ChartHeaderProps {
@@ -17,6 +17,8 @@ interface ChartHeaderProps {
   isForecastLoading?: boolean;
   onCrop: () => void;
   isCropping: boolean;
+  onMagnify: () => void;
+  isMagnifying: boolean;
 }
 
 const ChartHeader: React.FC<ChartHeaderProps> = ({
@@ -33,7 +35,9 @@ const ChartHeader: React.FC<ChartHeaderProps> = ({
   forecastLoadingDays = null,
   isForecastLoading = false,
   onCrop,
-  isCropping
+  isCropping,
+  onMagnify,
+  isMagnifying
 }) => {
   const [isDropdownOpen, setDropdownOpen] = React.useState(false);
   const [editingKey, setEditingKey] = React.useState<string | null>(null);
@@ -169,6 +173,18 @@ const ChartHeader: React.FC<ChartHeaderProps> = ({
       >
         {isCropping ? <Check size={14} /> : <Edit2 size={14} />}
         {isCropping ? 'CROP MODE' : 'SELECT RANGE'}
+      </button>
+
+      <button 
+        onClick={onMagnify}
+        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black tracking-widest transition-all shadow-sm active:scale-95 border ${
+          isMagnifying 
+          ? 'bg-indigo-500 text-white border-indigo-400 shadow-indigo-100' 
+          : 'bg-white text-slate-600 border-slate-200 hover:text-primary-600 hover:border-primary-100'
+        }`}
+      >
+        {isMagnifying ? <Check size={14} /> : <Search size={14} />}
+        {isMagnifying ? 'MAGNIFYING' : 'AI CLASSIFY'}
       </button>
     </div>
   );

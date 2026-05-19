@@ -23,6 +23,8 @@ interface FullscreenModalProps {
   onPredict?: (sensorKey: string, sensorColor: string) => void;
   onViewRangeChange?: (start: number, end: number) => void;
   existingClasses: string[];
+  isMagnifying?: boolean;
+  onMagnifyToggle?: (val: boolean) => void;
 }
 
 const FullscreenModal: React.FC<FullscreenModalProps> = ({ 
@@ -44,7 +46,9 @@ const FullscreenModal: React.FC<FullscreenModalProps> = ({
   onForecast,
   onPredict,
   onViewRangeChange,
-  existingClasses
+  existingClasses,
+  isMagnifying,
+  onMagnifyToggle
 }) => {  return (
     <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-in fade-in duration-300">
       <div className="flex justify-between items-center px-8 py-4 border-b border-slate-100">
@@ -70,7 +74,7 @@ const FullscreenModal: React.FC<FullscreenModalProps> = ({
             isForecastLoading={isForecastLoading}
             onSaveSegment={onSaveSegment} 
             sensorConfigs={sensorConfigs}
-            onUpdateConfig={onUpdateConfig}
+            onUpdateConfig={onUpdateConfig || (() => {})}
             isFullscreen={true}
             startDate={startDate}
             endDate={endDate}
@@ -78,10 +82,12 @@ const FullscreenModal: React.FC<FullscreenModalProps> = ({
             onStartDateChange={onStartDateChange}
             onEndDateChange={onEndDateChange}
             onRealtimeToggle={onRealtimeToggle}
-            onForecast={onForecast}
-            onPredict={onPredict}
+            onForecast={onForecast || (() => {})}
+            onPredict={onPredict || (() => {})}
             onViewRangeChange={onViewRangeChange}
             existingClasses={existingClasses}
+            isMagnifying={isMagnifying}
+            onMagnifyToggle={onMagnifyToggle}
           />
         </div>
       </div>

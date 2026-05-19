@@ -37,6 +37,7 @@ const App: React.FC = () => {
   const [storageSegments, setStorageSegments] = useState<StorageSegment[]>([]);
   const [isStorageLoading, setIsStorageLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isMagnifying, setIsMagnifying] = useState(false);
 
   // Time Range State
   const [startDateTime, setStartDateTime] = useState(formatForInput(new Date(Date.now() - 20 * 24 * 60 * 60 * 1000)));
@@ -206,6 +207,8 @@ const App: React.FC = () => {
                 onPredict={handleSensorPredict}
                 existingClasses={existingClasses}
                 onViewRangeChange={(s, e) => fetchData(false, s, e)}
+                isMagnifying={isMagnifying}
+                onMagnifyToggle={setIsMagnifying}
               />
             </div>
           </div>
@@ -277,6 +280,8 @@ const App: React.FC = () => {
           onForecast={handleForecast}
           onPredict={handleSensorPredict}
           existingClasses={existingClasses}
+          isMagnifying={isMagnifying}
+          onMagnifyToggle={setIsMagnifying}
         />
       )}
 

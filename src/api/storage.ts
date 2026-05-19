@@ -44,5 +44,10 @@ export const storageService = {
   clearStorage: async () => {
     const response = await api.delete('/api/storage/clear');
     return response.data;
+  },
+
+  classifySegment: async (data: Record<string, TelemetryData[]>, sensors: string[]) => {
+    const response = await api.post('/api/classify', { data, sensors });
+    return response.data;
   }
 };
