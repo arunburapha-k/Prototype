@@ -51,3 +51,13 @@ export interface DeviceInfo {
   type: string;
   label: string;
 }
+
+export interface StorageSegment {
+  id?: number;
+  external_id: number;
+  className: string;
+  start: number;
+  end: number;
+  sensors: string[];
+  data?: Record<string, TelemetryData[]>;
+}

@@ -1,8 +1,11 @@
 import logging
 import math
+import sqlite3
+import json
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import pandas as pd
 from prophet import Prophet
 from prophet.diagnostics import cross_validation
@@ -13,6 +16,56 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Forecast API")
+
+# Database setup
+DB_PATH = "segments.db"
+
+def get_db_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Performance PRAGMAs for every connection
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=OFF")  # Faster writes, safe for this use case
+    conn.execute("PRAGMA cache_size=-5000") # 5MB cache
+    conn.execute("PRAGMA temp_store=MEMORY") # Store temp tables in memory
+    return conn
+
+def init_db():
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            external_id INTEGER,
+            class_name TEXT,
+            base_class TEXT,
+            start_ts REAL,
+            end_ts REAL,
+            sensors TEXT,
+            data TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Optimization: Add indexes for faster lookups and sorting
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_external_id ON segments(external_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_created_at ON segments(created_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_class_name ON segments(class_name)')
+    
+    # Migration: Add base_class column if it doesn't exist (for existing DBs)
+    try:
+        cursor.execute('ALTER TABLE segments ADD COLUMN base_class TEXT')
+        # Update existing rows
+        cursor.execute("UPDATE segments SET base_class = CASE WHEN INSTR(class_name, '_') > 0 THEN SUBSTR(class_name, 1, INSTR(class_name, '_') - 1) ELSE class_name END")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    # Create index for base_class AFTER ensuring the column exists
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_base_class ON segments(base_class)')
+        
+    conn.commit()
+    conn.close()
+
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +110,15 @@ class BacktestResponse(BaseModel):
     overall: MetricSummary
     monthly: List[MonthlyMetric] = Field(default_factory=list)
     cutoffs: int
+
+class StorageSegment(BaseModel):
+    id: Optional[int] = None
+    external_id: int
+    className: str
+    start: float
+    end: float
+    sensors: List[str]
+    data: Optional[dict] = None
 
 def _clean_history(req: ForecastRequest) -> pd.DataFrame:
     df = pd.DataFrame(req.data, columns=['ds', 'y'])
@@ -247,6 +309,102 @@ async def make_backtest(req: ForecastRequest):
         return response
     except Exception as e:
         logger.error(f"Error backtesting: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/storage/save")
+async def save_to_storage(segments: List[StorageSegment]):
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        for seg in segments:
+            # Check if already exists to avoid duplicates (optional)
+            cursor.execute("SELECT id FROM segments WHERE external_id = ?", (seg.external_id,))
+            if cursor.fetchone():
+                continue
+            
+            # Auto-numbering for class names: classname_N
+            cursor.execute("SELECT COUNT(*) FROM segments WHERE class_name LIKE ?", (f"{seg.className}%",))
+            count = cursor.fetchone()[0]
+            final_class_name = f"{seg.className}_{count + 1}"
+                
+            cursor.execute('''
+                INSERT INTO segments (external_id, class_name, base_class, start_ts, end_ts, sensors, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                seg.external_id,
+                final_class_name,
+                seg.className, # This is the base name from frontend
+                seg.start,
+                seg.end,
+                json.dumps(seg.sensors),
+                json.dumps(seg.data) if seg.data else None
+            ))
+        
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": f"Saved {len(segments)} segments"}
+    except Exception as e:
+        logger.error(f"Error saving to storage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/storage/list", response_model=List[StorageSegment])
+async def list_storage(include_data: bool = False):
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        # Optimized Smart Sorting Logic using base_class column and index
+        query = """
+            WITH GroupTiming AS (
+                SELECT base_class, MIN(created_at) as first_seen
+                FROM segments
+                GROUP BY base_class
+            )
+            SELECT s.* 
+            FROM segments s
+            JOIN GroupTiming gt ON s.base_class = gt.base_class
+            ORDER BY gt.first_seen ASC, s.class_name ASC
+        """
+        
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        
+        result = []
+        for row in rows:
+            result.append(StorageSegment(
+                id=row['id'],
+                external_id=row['external_id'],
+                className=row['class_name'],
+                start=row['start_ts'],
+                end=row['end_ts'],
+                sensors=json.loads(row['sensors']),
+                data=json.loads(row['data']) if include_data and row['data'] else None
+            ))
+        
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Error listing storage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/storage/clear")
+async def clear_storage():
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        # Delete all records
+        cursor.execute("DELETE FROM segments")
+        # Reset auto-increment counter
+        cursor.execute("DELETE FROM sqlite_sequence WHERE name='segments'")
+        conn.commit()
+        # Vacuum must be outside of a transaction
+        conn.execute("VACUUM")
+        conn.close()
+        return {"status": "success"}
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error clearing storage: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

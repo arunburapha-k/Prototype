@@ -42,9 +42,16 @@ const CropPromptModal: React.FC<CropPromptModalProps> = ({ range, existingClasse
         
         <div className="space-y-6">
           <div className="relative" ref={dropdownRef}>
-            <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">
-              Class Name
-            </label>
+            <div className="flex justify-between items-end mb-2 px-1">
+              <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                Class Name
+              </label>
+              {existingClasses.length > 0 && (
+                <span className="text-[9px] font-bold text-primary-500 uppercase tracking-tight">
+                  {existingClasses.length} existing found
+                </span>
+              )}
+            </div>
             <div className="relative group">
               <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary-500 transition-colors">
                 <Tag size={18} />
@@ -77,7 +84,7 @@ const CropPromptModal: React.FC<CropPromptModalProps> = ({ range, existingClasse
             {showDropdown && filteredClasses.length > 0 && (
               <div className="absolute z-10 w-full mt-2 bg-white border border-slate-100 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
                 <div className="max-h-[200px] overflow-y-auto py-2">
-                  <p className="px-4 py-1 text-[10px] font-black text-slate-300 uppercase tracking-widest">Existing Classes</p>
+                  <p className="px-4 py-1 text-[10px] font-black text-slate-300 uppercase tracking-widest">Suggestions</p>
                   {filteredClasses.map((c, i) => (
                     <button
                       key={i}
@@ -86,6 +93,27 @@ const CropPromptModal: React.FC<CropPromptModalProps> = ({ range, existingClasse
                         setClassName(c);
                         setShowDropdown(false);
                       }}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {existingClasses.length > 0 && !showDropdown && (
+              <div className="mt-3">
+                <p className="text-[9px] font-black text-slate-300 uppercase tracking-widest mb-2 px-1">Quick Select</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {existingClasses.slice(0, 8).map((c, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setClassName(c)}
+                      className={`px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all border ${
+                        className === c 
+                          ? 'bg-primary-50 border-primary-200 text-primary-700 shadow-sm' 
+                          : 'bg-white border-slate-100 text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                      }`}
                     >
                       {c}
                     </button>

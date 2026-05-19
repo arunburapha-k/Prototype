@@ -3,3 +3,5 @@ uvicorn
 prophet
 pandas
 pydantic
+scikit-learn
+numpy
