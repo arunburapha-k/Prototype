@@ -1,9 +1,14 @@
 import logging
 import math
+import sqlite3
+import json
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict
 import pandas as pd
+import numpy as np
+import joblib
 from prophet import Prophet
 from prophet.diagnostics import cross_validation
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +18,129 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Forecast API")
+
+# Database setup
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "segments.db")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "classifier.joblib")
+SCALER_PATH = os.path.join(BASE_DIR, "models", "scaler.joblib")
+
+# Global model cache
+model_cache = {
+    "clf": None,
+    "scaler": None,
+    "last_loaded": 0
+}
+
+def load_model_if_needed():
+    """Load model and scaler into memory if not already loaded."""
+    try:
+        if not os.path.exists(MODEL_PATH) or not os.path.exists(SCALER_PATH):
+            return False
+            
+        # Check if files have changed (optional, but good for development)
+        mtime = os.path.getmtime(MODEL_PATH)
+        if model_cache["clf"] is None or mtime > model_cache["last_loaded"]:
+            logger.info("Loading/Reloading classification model into memory...")
+            model_cache["clf"] = joblib.load(MODEL_PATH)
+            model_cache["scaler"] = joblib.load(SCALER_PATH)
+            model_cache["last_loaded"] = mtime
+        
+        return True # Return True if loaded or already in cache
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+    return False
+
+def get_db_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Performance PRAGMAs for every connection
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=OFF")  # Faster writes, safe for this use case
+    conn.execute("PRAGMA cache_size=-5000") # 5MB cache
+    conn.execute("PRAGMA temp_store=MEMORY") # Store temp tables in memory
+    return conn
+
+def extract_features(data_dict: Dict[str, List[dict]], sensors: List[str], target_points: int = 200) -> Optional[List[float]]:
+    """
+    Extract statistical features for classification (Optimized & Resampled).
+    Resampling ensures that features are consistent regardless of the segment length.
+    """
+    all_features = []
+    for sensor in sensors:
+        sensor_data = data_dict.get(sensor)
+        if sensor_data:
+            # Extract values
+            values = [float(d['value']) for d in sensor_data if 'value' in d and d['value'] is not None]
+            
+            if len(values) > 0:
+                # Resample to target_points to normalize "scale" of data points
+                if len(values) != target_points:
+                    x_old = np.linspace(0, 1, len(values))
+                    x_new = np.linspace(0, 1, target_points)
+                    values = np.interp(x_new, x_old, values)
+                
+                arr = np.array(values)
+                # Use numpy for faster statistical calculations
+                mean_val = np.mean(arr)
+                std_val = np.std(arr) if len(arr) > 1 else 0
+                min_val = np.min(arr)
+                max_val = np.max(arr)
+                median_val = np.median(arr)
+                
+                # Skew and Kurtosis using pandas
+                s = pd.Series(arr)
+                skew_val = s.skew() if len(arr) > 2 else 0
+                kurt_val = s.kurtosis() if len(arr) > 3 else 0
+                net_change = arr[-1] - arr[0]
+                
+                all_features.extend([
+                    float(mean_val), float(std_val), float(min_val), 
+                    float(max_val), float(median_val), float(skew_val), 
+                    float(kurt_val), float(net_change)
+                ])
+            else:
+                all_features.extend([0.0] * 8)
+        else:
+            all_features.extend([0.0] * 8)
+    return all_features
+
+def init_db():
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            external_id INTEGER,
+            class_name TEXT,
+            base_class TEXT,
+            start_ts REAL,
+            end_ts REAL,
+            sensors TEXT,
+            data TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Optimization: Add indexes for faster lookups and sorting
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_external_id ON segments(external_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_created_at ON segments(created_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_class_name ON segments(class_name)')
+    
+    # Migration: Add base_class column if it doesn't exist (for existing DBs)
+    try:
+        cursor.execute('ALTER TABLE segments ADD COLUMN base_class TEXT')
+        # Update existing rows
+        cursor.execute("UPDATE segments SET base_class = CASE WHEN INSTR(class_name, '_') > 0 THEN SUBSTR(class_name, 1, INSTR(class_name, '_') - 1) ELSE class_name END")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    # Create index for base_class AFTER ensuring the column exists
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_base_class ON segments(base_class)')
+        
+    conn.commit()
+    conn.close()
+
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +185,23 @@ class BacktestResponse(BaseModel):
     overall: MetricSummary
     monthly: List[MonthlyMetric] = Field(default_factory=list)
     cutoffs: int
+
+class StorageSegment(BaseModel):
+    id: Optional[int] = None
+    external_id: int
+    className: str
+    start: float
+    end: float
+    sensors: List[str]
+    data: Optional[dict] = None
+
+class ClassifyRequest(BaseModel):
+    sensors: List[str]
+    data: Dict[str, List[dict]]
+
+class ClassifyResponse(BaseModel):
+    className: str
+    confidence: float
 
 def _clean_history(req: ForecastRequest) -> pd.DataFrame:
     df = pd.DataFrame(req.data, columns=['ds', 'y'])
@@ -164,7 +309,7 @@ def _summarize_backtest(cv: pd.DataFrame) -> BacktestResponse:
     return BacktestResponse(overall=overall, monthly=monthly_rows, cutoffs=len(monthly_rows))
 
 @app.post("/api/forecast", response_model=List[ForecastPoint])
-async def make_forecast(req: ForecastRequest):
+def make_forecast(req: ForecastRequest):
     try:
         df = _clean_history(req)
         if len(df) < 2:
@@ -209,7 +354,7 @@ async def make_forecast(req: ForecastRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/backtest", response_model=BacktestResponse)
-async def make_backtest(req: ForecastRequest):
+def make_backtest(req: ForecastRequest):
     try:
         df = _clean_history(req)
         if len(df) < 2:
@@ -247,6 +392,123 @@ async def make_backtest(req: ForecastRequest):
         return response
     except Exception as e:
         logger.error(f"Error backtesting: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/storage/save")
+async def save_to_storage(segments: List[StorageSegment]):
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        for seg in segments:
+            # Check if already exists to avoid duplicates (optional)
+            cursor.execute("SELECT id FROM segments WHERE external_id = ?", (seg.external_id,))
+            if cursor.fetchone():
+                continue
+            
+            # Auto-numbering for class names: classname_N
+            cursor.execute("SELECT COUNT(*) FROM segments WHERE class_name LIKE ?", (f"{seg.className}%",))
+            count = cursor.fetchone()[0]
+            final_class_name = f"{seg.className}_{count + 1}"
+                
+            cursor.execute('''
+                INSERT INTO segments (external_id, class_name, base_class, start_ts, end_ts, sensors, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                seg.external_id,
+                final_class_name,
+                seg.className, # This is the base name from frontend
+                seg.start,
+                seg.end,
+                json.dumps(seg.sensors),
+                json.dumps(seg.data) if seg.data else None
+            ))
+        
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": f"Saved {len(segments)} segments"}
+    except Exception as e:
+        logger.error(f"Error saving to storage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/storage/list", response_model=List[StorageSegment])
+async def list_storage(include_data: bool = False):
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        # Sort by ID ascending as requested
+        query = "SELECT * FROM segments ORDER BY id ASC"
+        
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        
+        result = []
+        for row in rows:
+            result.append(StorageSegment(
+                id=row['id'],
+                external_id=row['external_id'],
+                className=row['class_name'],
+                start=row['start_ts'],
+                end=row['end_ts'],
+                sensors=json.loads(row['sensors']),
+                data=json.loads(row['data']) if include_data and row['data'] else None
+            ))
+        
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"Error listing storage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/classify", response_model=ClassifyResponse)
+def classify_segment(req: ClassifyRequest):
+    try:
+        if not load_model_if_needed():
+            logger.error(f"Model files not found at {MODEL_PATH} or {SCALER_PATH}")
+            raise HTTPException(status_code=404, detail="Model not trained yet or failed to load")
+
+        clf = model_cache["clf"]
+        scaler = model_cache["scaler"]
+
+        features = extract_features(req.data, req.sensors)
+        if not features:
+            raise HTTPException(status_code=400, detail="Could not extract features")
+
+        X = np.array([features])
+        X_scaled = scaler.transform(X)
+        
+        prediction = clf.predict(X_scaled)[0]
+        probabilities = clf.predict_proba(X_scaled)[0]
+        confidence = float(np.max(probabilities))
+
+        return ClassifyResponse(
+            className=str(prediction),
+            confidence=confidence
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error classifying: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/storage/clear")
+async def clear_storage():
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        # Delete all records
+        cursor.execute("DELETE FROM segments")
+        # Reset auto-increment counter
+        cursor.execute("DELETE FROM sqlite_sequence WHERE name='segments'")
+        conn.commit()
+        # Vacuum must be outside of a transaction
+        conn.execute("VACUUM")
+        conn.close()
+        return {"status": "success"}
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error clearing storage: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
