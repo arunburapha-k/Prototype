@@ -19,6 +19,7 @@ interface StorageListProps {
 
 const StorageList: React.FC<StorageListProps> = ({ segments, onClear, loading }) => {
   const groupedSegments = useMemo(() => {
+    // 1. Group by base class
     const groups = segments.reduce((acc, seg) => {
       const base = seg.className.includes('_') 
         ? seg.className.split('_').slice(0, -1).join('_') 
@@ -27,7 +28,14 @@ const StorageList: React.FC<StorageListProps> = ({ segments, onClear, loading })
       acc[base].push(seg);
       return acc;
     }, {} as Record<string, typeof segments>);
-    return Object.entries(groups);
+
+    // 2. Convert to array and sort groups by the minimum ID in each group
+    // This ensures the groups appear in the order they were first created
+    return Object.entries(groups).sort((a, b) => {
+      const minIdA = Math.min(...a[1].map(s => s.id || 0));
+      const minIdB = Math.min(...b[1].map(s => s.id || 0));
+      return minIdA - minIdB;
+    });
   }, [segments]);
 
   if (loading && segments.length === 0) {

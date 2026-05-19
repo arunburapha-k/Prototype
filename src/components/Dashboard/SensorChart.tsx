@@ -1,8 +1,10 @@
 import { useRef, useState, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react';
 import ReactECharts from 'echarts-for-react';
-import { Loader2, Maximize2 } from 'lucide-react';
+import { Loader2, Maximize2, Search } from 'lucide-react';
 import CropPromptModal from '../Modals/CropPromptModal';
+import ClassificationResultModal from '../Modals/ClassificationResultModal';
 import ChartHeader from './ChartHeader';
+import { storageService } from '../../api/storage';
 import type { CroppedSegment, DeviceTelemetry, SensorConfig, TelemetryData } from '../../types/index';
 
 type ChartPoint = [number, number, number?, number?];
@@ -72,6 +74,8 @@ interface SensorChartProps {
   onPredict: (sensorKey: string, sensorColor: string) => void;
   onViewRangeChange?: (start: number, end: number) => void;
   existingClasses: string[];
+  isMagnifying?: boolean;
+  onMagnifyToggle?: (val: boolean) => void;
 }
 
 export interface SensorChartRef {
@@ -97,12 +101,16 @@ const SensorChart = forwardRef<SensorChartRef, SensorChartProps>(({
   onRealtimeToggle,
   onForecast,
   onViewRangeChange,
-  existingClasses
+  existingClasses,
+  isMagnifying,
+  onMagnifyToggle
 }, ref) => {
   const chartRef = useRef<ReactECharts>(null);
   const [isModalOpen, setModalOpen] = useState(false);
   const [tempRange, setTempRange] = useState<[number, number] | null>(null);
   const [isCropping, setIsCropping] = useState(false);
+  const [isClassifying, setIsClassifying] = useState(false);
+  const [classificationResult, setClassificationResult] = useState<{ className: string, confidence: number } | null>(null);
 
   useImperativeHandle(ref, () => ({
     resetChart: () => {
@@ -110,13 +118,44 @@ const SensorChart = forwardRef<SensorChartRef, SensorChartProps>(({
     }
   }));
 
-  const onBrushEnd = useCallback((params: BrushEndParams) => {
+  const onBrushEnd = useCallback(async (params: BrushEndParams) => {
     const area = params.areas?.[0];
-    if (area?.coordRange) {
-      setTempRange([area.coordRange[0], area.coordRange[1]]);
+    if (!area?.coordRange) return;
+
+    const start = area.coordRange[0];
+    const end = area.coordRange[1];
+
+    if (isMagnifying) {
+      setIsClassifying(true);
+      try {
+        const segmentData: Record<string, TelemetryData[]> = {};
+        const activeSensors = sensorConfigs.filter(c => c.visible).map(c => c.key);
+        
+        activeSensors.forEach(key => {
+          const sensorData = data[key];
+          if (sensorData) {
+            segmentData[key] = sensorData.filter(d => d.ts >= start && d.ts <= end);
+          }
+        });
+
+        const result = await storageService.classifySegment(segmentData, activeSensors);
+        setClassificationResult(result);
+      } catch (err) {
+        console.error('Classification failed:', err);
+        alert('Classification failed. Make sure the model is trained.');
+      } finally {
+        setIsClassifying(false);
+        // Clear brush
+        const instance = chartRef.current?.getEchartsInstance();
+        if (instance) {
+          instance.dispatchAction({ type: 'brush', command: 'clear', areas: [] });
+        }
+      }
+    } else {
+      setTempRange([start, end]);
       setModalOpen(true);
     }
-  }, []);
+  }, [isMagnifying, data, sensorConfigs]);
 
   const handleDataZoom = useCallback(() => {
     if (!onViewRangeChange) return;
@@ -234,6 +273,7 @@ const SensorChart = forwardRef<SensorChartRef, SensorChartProps>(({
     if (instance) {
       const nextState = !isCropping;
       setIsCropping(nextState);
+      if (nextState && isMagnifying && onMagnifyToggle) onMagnifyToggle(false);
       
       instance.dispatchAction({
         type: 'takeGlobalCursor',
@@ -244,7 +284,25 @@ const SensorChart = forwardRef<SensorChartRef, SensorChartProps>(({
         } : false
       });
     }
-  }, [isCropping]);
+  }, [isCropping, isMagnifying, onMagnifyToggle]);
+
+  const handleMagnify = useCallback(() => {
+    const instance = chartRef.current?.getEchartsInstance();
+    if (instance && onMagnifyToggle) {
+      const nextState = !isMagnifying;
+      onMagnifyToggle(nextState);
+      if (nextState && isCropping) setIsCropping(false);
+
+      instance.dispatchAction({
+        type: 'takeGlobalCursor',
+        key: 'brush',
+        brushOption: nextState ? {
+          brushType: 'lineX',
+          brushMode: 'single'
+        } : false
+      });
+    }
+  }, [isMagnifying, isCropping, onMagnifyToggle]);
 
   return (
     <div className={`flex flex-col flex-1 ${isFullscreen ? 'h-full' : ''} w-full`}>
@@ -264,6 +322,8 @@ const SensorChart = forwardRef<SensorChartRef, SensorChartProps>(({
           isForecastLoading={isForecastLoading}
           onCrop={handleCrop}
           isCropping={isCropping}
+          onMagnify={handleMagnify}
+          isMagnifying={isMagnifying}
         />
         
         <div className="flex items-center gap-2">
@@ -288,14 +348,25 @@ const SensorChart = forwardRef<SensorChartRef, SensorChartProps>(({
             onEvents={{ 'brushEnd': onBrushEnd, 'dataZoom': handleDataZoom }}
           />
         </div>
-        {isForecastLoading && (
+        {(isForecastLoading || isClassifying) && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/45 backdrop-blur-[1px]">
-            <div className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-100 bg-white shadow-lg shadow-slate-200/70">
-              <Loader2 size={22} className="animate-spin text-primary-600" />
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-100 bg-white shadow-lg shadow-slate-200/70">
+                <Loader2 size={22} className="animate-spin text-primary-600" />
+              </div>
+              {isClassifying && <span className="text-[10px] font-black text-primary-600 uppercase tracking-widest bg-white px-3 py-1 rounded-full shadow-sm border border-slate-100">AI Classifying...</span>}
             </div>
           </div>
         )}
       </div>
+
+      {classificationResult && (
+        <ClassificationResultModal 
+          className={classificationResult.className}
+          confidence={classificationResult.confidence}
+          onClose={() => setClassificationResult(null)}
+        />
+      )}
 
       {isModalOpen && tempRange && (
         <CropPromptModal 
