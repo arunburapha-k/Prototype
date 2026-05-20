@@ -215,11 +215,26 @@ def _create_prophet_model() -> Prophet:
         daily_seasonality=True,
         weekly_seasonality=True,
         yearly_seasonality=False,
-        changepoint_prior_scale=0.5,
-        seasonality_prior_scale=10.0,
-        interval_width=0.95,
+        changepoint_prior_scale=0.05, # Reduced for stability and speed
+        seasonality_prior_scale=1.0,   # Reduced
+        interval_width=0.80,           # Narrower interval for faster uncertainty calculation
+        uncertainty_samples=100,       # Significantly reduced from default 1000
         growth='linear'
     )
+
+def _resample_data(df: pd.DataFrame, target_points: int = 500) -> pd.DataFrame:
+    """Resample dataframe to a target number of points to speed up Prophet."""
+    if len(df) <= target_points:
+        return df
+    
+    # Calculate resampling frequency
+    df = df.set_index('ds')
+    # Use a simple numeric index resampling if time-based is complex
+    # But since we have 'ds', we can use it. 
+    # However, a simpler way to get exactly N points:
+    indices = np.linspace(0, len(df) - 1, target_points).astype(int)
+    resampled_df = df.iloc[indices].reset_index()
+    return resampled_df
 
 def _generate_monthly_cutoffs(df: pd.DataFrame, horizon_td: pd.Timedelta) -> List[pd.Timestamp]:
     if df.empty:
@@ -314,6 +329,9 @@ def make_forecast(req: ForecastRequest):
         df = _clean_history(req)
         if len(df) < 2:
             return []
+        
+        # Resample to speed up fitting
+        df = _resample_data(df, target_points=1000)
 
         # Initialize and fit Prophet
         m = _create_prophet_model()
@@ -359,6 +377,9 @@ def make_backtest(req: ForecastRequest):
         df = _clean_history(req)
         if len(df) < 2:
             return BacktestResponse(overall=MetricSummary(), monthly=[], cutoffs=0)
+
+        # Resample for backtest as well (very important for cross_validation speed)
+        df = _resample_data(df, target_points=500)
 
         safe_interval_ms = max(1, req.intervalMs)
         horizon_days = max(1, req.horizonDays)

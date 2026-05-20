@@ -71,32 +71,42 @@ export const useForecast = (
       
       if (forecastPoints.length === 0) return null;
 
-      let metrics: ForecastBacktestMetrics | null = null;
-      try {
-        const backtestResponse = await fetch(`${BACKEND_URL}/api/backtest`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            data: timeSeries,
-            horizonDays: 20,
-            intervalMs
-          })
-        });
-
-        if (backtestResponse.ok) {
-          metrics = (await backtestResponse.json()) as ForecastBacktestMetrics;
-        }
-      } catch (backtestError) {
-        console.error('Backtest API failed:', backtestError);
-      }
-
-      return {
+      // Return forecast points immediately, metrics will be fetched in background if needed
+      // or we can trigger a separate update for metrics to avoid blocking
+      const bundle: ForecastBundle = {
         points: [
           { ts: lastHistoricalPoint[0], value: lastHistoricalPoint[1] },
           ...forecastPoints.filter(point => point.ts > lastHistoricalPoint[0])
         ],
-        metrics
+        metrics: null
       };
+
+      // Trigger backtest in background without awaiting it for the initial return
+      void (async () => {
+        try {
+          const backtestResponse = await fetch(`${BACKEND_URL}/api/backtest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              data: timeSeries,
+              horizonDays: 20,
+              intervalMs
+            })
+          });
+
+          if (backtestResponse.ok) {
+            const metrics = (await backtestResponse.json()) as ForecastBacktestMetrics;
+            setForecastMetrics(prev => ({
+              ...prev,
+              [sensorKey]: metrics
+            }));
+          }
+        } catch (backtestError) {
+          console.error('Backtest API failed:', backtestError);
+        }
+      })();
+
+      return bundle;
     } catch (err) {
       console.error(err);
       return null;
