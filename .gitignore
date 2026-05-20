@@ -13,11 +13,16 @@ dist-ssr
 *.local
 
 # Python
-venv/
-.venv/
 __pycache__/
 *.py[cod]
 *$py.class
+venv/
+.venv/
+ENV/
+env/
+python-backend/venv/
+python-backend/__pycache__/
+*.db
 
 # Editor directories and files
 .vscode/*
@@ -29,3 +34,14 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+python-backend/venv/
+python-backend/__pycache__/
+python-backend/*.py[cod]
+python-backend/*$py.class
+python-backend/.pytest_cache/
+python-backend/models/
+python-backend/*.db
+python-backend/*.db-journal
+python-backend/*.db-wal

@@ -1,24 +1,26 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 
 // Layout & Components
 import Header from './components/Layout/Header';
 import SensorChart from './components/Dashboard/SensorChart';
 import type { SensorChartRef } from './components/Dashboard/SensorChart';
 import CroppedList from './components/Dashboard/CroppedList';
+import StorageList from './components/Dashboard/StorageList';
 import FullscreenModal from './components/Modals/FullscreenModal';
 import PreviewModal from './components/Modals/PreviewModal';
 
 // Hooks & Utilities
 import { useTelemetry } from './hooks/useTelemetry';
 import { useForecast } from './hooks/useForecast';
+import { storageService } from './api/storage';
 import { formatForInput } from './utils';
 import { THINGSBOARD_TOKEN } from './constants';
 
 // Types
 import type { 
   CroppedSegment, 
-  DeviceTelemetry,
-  SensorConfig 
+  SensorConfig,
+  StorageSegment
 } from './types/index';
 
 // Icons
@@ -32,6 +34,10 @@ const App: React.FC = () => {
   const [sensorConfigs, setSensorConfigs] = useState<SensorConfig[]>([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [previewSegment, setPreviewSegment] = useState<CroppedSegment | null>(null);
+  const [storageSegments, setStorageSegments] = useState<StorageSegment[]>([]);
+  const [isStorageLoading, setIsStorageLoading] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [isMagnifying, setIsMagnifying] = useState(false);
 
   // Time Range State
   const [startDateTime, setStartDateTime] = useState(formatForInput(new Date(Date.now() - 20 * 24 * 60 * 60 * 1000)));
@@ -67,11 +73,33 @@ const App: React.FC = () => {
     fetchData();
   }, [startDateTime, endDateTime, isRealtime, fetchData]);
 
+  // Fetch storage data
+  const fetchStorage = useCallback(async () => {
+    setIsStorageLoading(true);
+    try {
+      const data = await storageService.listSegments();
+      setStorageSegments(data);
+    } catch (err) {
+      console.error('Failed to fetch storage:', err);
+    } finally {
+      setIsStorageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStorage();
+  }, [fetchStorage]);
+
   // Derived State
   const existingClasses = useMemo(() => {
-    const classes = croppedSegments.map(s => s.className);
-    return Array.from(new Set(classes)).filter(Boolean);
-  }, [croppedSegments]);
+    // Helper to strip auto-numbering suffix (e.g., "class_1" -> "class")
+    const stripSuffix = (name: string) => name.replace(/_\d+$/, '');
+    
+    const localClasses = croppedSegments.map(s => stripSuffix(s.className));
+    const storageClasses = storageSegments.map(s => stripSuffix(s.className));
+    
+    return Array.from(new Set([...localClasses, ...storageClasses])).filter(Boolean);
+  }, [croppedSegments, storageSegments]);
 
   // Handlers
   const handleReset = () => {
@@ -88,29 +116,30 @@ const App: React.FC = () => {
     }
   };
 
-  const handleExport = () => {
+  const handleSendToStorage = async () => {
     if (croppedSegments.length === 0) return;
-    const exportData = croppedSegments.map(segment => {
-      const segmentData: Record<string, DeviceTelemetry[string]> = {};
-      segment.sensors.forEach(label => {
-        const config = sensorConfigs.find(c => c.label === label || c.key === label);
-        const key = config ? config.key : label;
-        if (telemetry[key]) {
-          segmentData[label] = telemetry[key].filter(d => d.ts >= segment.start && d.ts <= segment.end);
-        }
-      });
-      return { ...segment, data: segmentData };
-    });
-    
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `ai-segments-${Date.now()}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    setIsSending(true);
+    try {
+      await storageService.saveSegments(croppedSegments, telemetry);
+      await fetchStorage();
+      // Clear cropped segments after sending to allow for new manual cropping
+      setSegments([]);
+    } catch (err) {
+      console.error('Failed to send to storage:', err);
+      alert('Failed to send to storage. Make sure backend is running.');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleClearStorage = async () => {
+    if (!confirm('Are you sure you want to clear all records in SQLite?')) return;
+    try {
+      await storageService.clearStorage();
+      await fetchStorage();
+    } catch (err) {
+      console.error('Failed to clear storage:', err);
+    }
   };
 
   // Sync sensor configs when telemetry arrives
@@ -178,6 +207,8 @@ const App: React.FC = () => {
                 onPredict={handleSensorPredict}
                 existingClasses={existingClasses}
                 onViewRangeChange={(s, e) => fetchData(false, s, e)}
+                isMagnifying={isMagnifying}
+                onMagnifyToggle={setIsMagnifying}
               />
             </div>
           </div>
@@ -202,11 +233,28 @@ const App: React.FC = () => {
               
               {croppedSegments.length > 0 && (
                 <div className="mt-10 pt-8 border-t border-slate-50">
-                  <button onClick={handleExport} className="w-full py-4 bg-primary-600 hover:bg-primary-700 text-white text-xs font-black tracking-[0.2em] rounded-2xl shadow-xl shadow-primary-100 transition-all active:scale-[0.98] uppercase">
-                    Export Dataset (.JSON)
+                  <button 
+                    onClick={handleSendToStorage} 
+                    disabled={isSending}
+                    className="w-full py-4 bg-primary-600 hover:bg-primary-700 text-white text-xs font-black tracking-[0.2em] rounded-2xl shadow-xl shadow-primary-100 transition-all active:scale-[0.98] uppercase disabled:opacity-50"
+                  >
+                    {isSending ? 'Sending...' : 'Send to Storage (SQLite)'}
                   </button>
                 </div>
               )}
+
+              <div className="mt-10 pt-8 border-t border-slate-100">
+                <div className="flex items-center gap-2 mb-6">
+                  <div className="p-2 bg-slate-100 rounded-xl text-slate-600 shadow-sm"><Database size={18} /></div>
+                  <h2 className="text-lg font-black text-slate-800 tracking-tight">Storage (SQLite)</h2>
+                </div>
+                
+                <StorageList 
+                  segments={storageSegments} 
+                  onClear={handleClearStorage}
+                  loading={isStorageLoading}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -232,6 +280,8 @@ const App: React.FC = () => {
           onForecast={handleForecast}
           onPredict={handleSensorPredict}
           existingClasses={existingClasses}
+          isMagnifying={isMagnifying}
+          onMagnifyToggle={setIsMagnifying}
         />
       )}
 
